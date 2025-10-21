@@ -22,9 +22,11 @@ const PORT = process.env.PORT || 5000;
 // ================================
 // Configuração de Middlewares
 // ================================
+const frontOrigin = (process.env.FRONT_ORIGIN || 'http://127.0.0.1:5500').replace(/\/$/, '');
+
 app.use(
   cors({
-    origin: process.env.FRONT_ORIGIN || 'http://127.0.0.1:5500',
+    origin: frontOrigin,
     credentials: true,
   })
 );
