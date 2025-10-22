@@ -21,13 +21,12 @@ const preferenceClient = new mercadopago.Preference(MP);
 // ================================
 // 💳 CRIAR PREFERÊNCIA DE PAGAMENTO
 // ================================
-console.log("📥 Body recebido do front:", req.body);
 
 router.post('/mp/preference', auth, async (req, res) => {
   try {
     // ⚠️ usa "let" pra poder sobrescrever o frete se for teste
     let { itens, enderecoEntrega, frete } = req.body;
-
+    console.log("📥 Body recebido do front:", req.body);
     if (!itens || !Array.isArray(itens) || itens.length === 0) {
       return res.status(400).json({ erro: 'Itens inválidos' });
     }
