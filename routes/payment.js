@@ -23,7 +23,8 @@ const preferenceClient = new mercadopago.Preference(MP);
 // ================================
 router.post('/mp/preference', auth, async (req, res) => {
   try {
-    const { itens, enderecoEntrega, frete } = req.body;
+    // ⚠️ usa "let" pra poder sobrescrever o frete se for teste
+    let { itens, enderecoEntrega, frete } = req.body;
 
     if (!itens || !Array.isArray(itens) || itens.length === 0) {
       return res.status(400).json({ erro: 'Itens inválidos' });
@@ -48,14 +49,17 @@ router.post('/mp/preference', auth, async (req, res) => {
         quantidade: i.quantidade || 1
       });
     }
-    // Se o produto de teste for aquele de R$1, zera o frete
-if (itensValidados.length === 1 && itensValidados[0].preco === 1) {
-  console.log('🧪 Teste detectado — frete zerado automaticamente');
-  frete = 0;
-}
 
-    const total = subtotal + (frete || 0);
+    // 🧪 Se o produto de teste for aquele de R$1, zera o frete
+    if (itensValidados.length === 1 && itensValidados[0].preco === 1) {
+      console.log('🧪 Teste detectado — frete zerado automaticamente');
+      frete = 0;
+    }
 
+    const total = subtotal + Number(frete || 0);
+    console.log(`💰 Subtotal: ${subtotal}, Frete: ${frete}, Total: ${total}`);
+
+    // 📦 Cria pedido no banco antes de gerar preferência MP
     const order = await Order.create({
       usuario: req.user.id,
       produtos: itensValidados,
@@ -68,8 +72,10 @@ if (itensValidados.length === 1 && itensValidados[0].preco === 1) {
 
     console.log(`📦 Pedido criado (${order._id}) — Total: R$${total}`);
 
-    const frontOrigin = process.env.FRONT_ORIGIN?.trim().replace(/\/$/, '') || 'http://127.0.0.1:5500';
+    const frontOrigin =
+      process.env.FRONT_ORIGIN?.trim().replace(/\/$/, '') || 'http://127.0.0.1:5500';
 
+    // 🧾 Cria preferência no Mercado Pago
     const pref = await preferenceClient.create({
       body: {
         items: itensValidados.map(i => ({
@@ -160,7 +166,8 @@ router.post('/mp/webhook', async (req, res) => {
       // 📧 E-mails (cliente + admin)
       const cliente = order.usuario;
       const endereco = order.enderecoEntrega;
-      const adminEmail = process.env.ADMIN_EMAIL || process.env.EMAIL_FROM || 'admin@jfsemijoias.com';
+      const adminEmail =
+        process.env.ADMIN_EMAIL || process.env.EMAIL_FROM || 'admin@jfsemijoias.com';
 
       const resumoProdutos = order.produtos
         .map(
