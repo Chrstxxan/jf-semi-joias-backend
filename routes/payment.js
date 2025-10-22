@@ -48,6 +48,11 @@ router.post('/mp/preference', auth, async (req, res) => {
         quantidade: i.quantidade || 1
       });
     }
+    // Se o produto de teste for aquele de R$1, zera o frete
+if (itensValidados.length === 1 && itensValidados[0].preco === 1) {
+  console.log('🧪 Teste detectado — frete zerado automaticamente');
+  frete = 0;
+}
 
     const total = subtotal + (frete || 0);
 
