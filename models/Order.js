@@ -18,7 +18,11 @@ const orderSchema = new mongoose.Schema({
   subtotal: { type: Number, required: true },
   frete: { type: Number, default: 0 },
   total: { type: Number, required: true },
+
+  // 👇 agora com nome e telefone
   enderecoEntrega: {
+    nome: String,
+    telefone: String,
     cep: String,
     rua: String,
     numero: String,
@@ -27,12 +31,15 @@ const orderSchema = new mongoose.Schema({
     cidade: String,
     uf: String,
   },
+
+  // 👇 padronizado em PT-BR
   statusPagamento: {
     type: String,
-    enum: ["pending", "approved", "rejected"],
-    default: "pending",
+    enum: ["pendente", "pago", "rejeitado"],
+    default: "pendente",
   },
-  mpPreferenceId: { type: String }, // ID da preferência do Mercado Pago
+
+  mpPreferenceId: { type: String },
 
   status: { 
     type: String, 
@@ -40,9 +47,8 @@ const orderSchema = new mongoose.Schema({
     default: "pendente" 
   },
 
-  // 🆕 Campos adicionados
-  rastreio: { type: String, default: null }, // Código de rastreamento dos Correios
-  dataEnvio: { type: Date, default: null },  // Data em que o pedido foi enviado
+  rastreio: { type: String, default: null },
+  dataEnvio: { type: Date, default: null },
 
   criadoEm: { type: Date, default: Date.now },
 });

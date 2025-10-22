@@ -20,58 +20,52 @@ const preferenceClient = new mercadopago.Preference(MP);
 
 // ================================
 // 💳 CRIAR PREFERÊNCIA DE PAGAMENTO
+// (Cria o pedido ANTES de abrir o MP, e envia metadata.orderId)
 // ================================
-
 router.post('/mp/preference', auth, async (req, res) => {
   try {
-    // ⚠️ usa "let" pra poder sobrescrever o frete se for teste
     let { itens, enderecoEntrega, frete } = req.body;
-    console.log("📥 Body recebido do front:", req.body);
     if (!itens || !Array.isArray(itens) || itens.length === 0) {
       return res.status(400).json({ erro: 'Itens inválidos' });
     }
 
-    console.log('🛒 Itens recebidos no pagamento:', itens);
-
+    // Busca produtos e valida
     let subtotal = 0;
     const itensValidados = [];
-
     for (const i of itens) {
-      const p = await Produto.findById(i.produtoId.trim());
+      const p = await Produto.findById(String(i.produtoId).trim());
       if (!p) return res.status(400).json({ erro: `Produto inválido: ${i.produtoId}` });
 
-      subtotal += p.preco * (i.quantidade || 1);
+      const qnt = Number(i.quantidade || 1);
+      subtotal += p.preco * qnt;
 
       itensValidados.push({
         produtoId: p._id,
         nome: p.nome,
         imagem: p.imagens?.[0] || '',
         preco: p.preco,
-        quantidade: i.quantidade || 1
+        quantidade: qnt
       });
     }
 
-    // 🧪 Se o produto de teste for aquele de R$1, zera o frete
+    // 🧪 Se for o produto de teste de R$1, zera o frete
     if (itensValidados.length === 1 && itensValidados[0].preco === 1) {
-      console.log('🧪 Teste detectado — frete zerado automaticamente');
       frete = 0;
     }
 
     const total = subtotal + Number(frete || 0);
-    console.log(`💰 Subtotal: ${subtotal}, Frete: ${frete}, Total: ${total}`);
 
-    // 📦 Cria pedido no banco antes de gerar preferência MP
+    // 📦 Cria pedido
     const order = await Order.create({
       usuario: req.user.id,
       produtos: itensValidados,
       subtotal,
-      frete: frete || 0,
+      frete: Number(frete || 0),
       total,
-      statusPagamento: 'pending',
-      enderecoEntrega
+      statusPagamento: 'pendente',
+      status: 'pendente',
+      enderecoEntrega, // 👈 já com nome e telefone
     });
-
-    console.log(`📦 Pedido criado (${order._id}) — Total: R$${total}`);
 
     const frontOrigin =
       process.env.FRONT_ORIGIN?.trim().replace(/\/$/, '') || 'http://127.0.0.1:5500';
@@ -80,6 +74,7 @@ router.post('/mp/preference', auth, async (req, res) => {
     const pref = await preferenceClient.create({
       body: {
         items: itensValidados.map(i => ({
+          id: String(order._id),                // 👈 opcional, mas útil
           title: i.nome,
           quantity: i.quantidade,
           unit_price: i.preco,
@@ -91,18 +86,15 @@ router.post('/mp/preference', auth, async (req, res) => {
           pending: `${frontOrigin}/index.html?pagamento=pending`
         },
         auto_return: 'approved',
-        metadata: { orderId: String(order._id) },
+        metadata: { orderId: String(order._id) }, // 👈 usado no webhook
         notification_url: `${process.env.BASE_URL}/payment/mp/webhook`
       }
     });
 
-    const checkoutUrl = pref.init_point;
-    console.log(`✅ Preferência criada (PRODUÇÃO) — ${pref.id}`);
-
     await Order.findByIdAndUpdate(order._id, { mpPreferenceId: pref.id });
 
     res.json({
-      init_point: checkoutUrl,
+      init_point: pref.init_point,
       preference_id: pref.id,
       mode: 'production'
     });
@@ -113,14 +105,14 @@ router.post('/mp/preference', auth, async (req, res) => {
 });
 
 // ================================
-// 📩 WEBHOOK COM TRANSAÇÃO ATÔMICA + E-MAILS
+// 📩 WEBHOOK
+// Mapeia status do MP -> PT-BR e atualiza o pedido
 // ================================
 router.post('/mp/webhook', async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
 
   try {
-    console.log('📩 Webhook recebido:', req.body);
     const { data } = req.body;
     if (!data?.id) {
       await session.abortTransaction();
@@ -130,7 +122,8 @@ router.post('/mp/webhook', async (req, res) => {
 
     const paymentClient = new mercadopago.Payment(MP);
     const payment = await paymentClient.get({ id: data.id });
-    const status = payment.body.status;
+
+    const mpStatus = payment.body.status; // approved, pending, rejected
     const orderId = payment.body.metadata?.orderId;
 
     if (!orderId) {
@@ -147,17 +140,24 @@ router.post('/mp/webhook', async (req, res) => {
       return res.sendStatus(200);
     }
 
-    order.statusPagamento = status;
-    order.status = status === 'approved' ? 'pago' : 'pendente';
+    // 🎯 Mapeia status para PT-BR
+    const statusPagamento =
+      mpStatus === 'approved'
+        ? 'pago'
+        : mpStatus === 'rejected'
+        ? 'rejeitado'
+        : 'pendente';
+
+    order.statusPagamento = statusPagamento;
+    // Convenção: status do pedido segue statusPagamento (pode ser ajustado depois)
+    order.status = statusPagamento === 'pago' ? 'pago' : order.status;
+
     await order.save({ session });
 
-    // Só processa o resto se o pagamento for aprovado
-    if (status === 'approved') {
-      console.log(`💰 Pagamento aprovado para pedido ${orderId}`);
-
-      // 🔻 Decrementa estoque (dentro da transação)
+    if (statusPagamento === 'pago') {
+      // 🔻 Decrementa estoque
       for (const item of order.produtos) {
-        const produto = await Produto.findById(item.produtoId).session(session);
+        const produto = await require('../models/Produto').findById(item.produtoId).session(session);
         if (produto) {
           produto.estoque = Math.max(0, (produto.estoque || 0) - item.quantidade);
           await produto.save({ session });
@@ -167,13 +167,10 @@ router.post('/mp/webhook', async (req, res) => {
       // 📧 E-mails (cliente + admin)
       const cliente = order.usuario;
       const endereco = order.enderecoEntrega;
-      const adminEmail =
-        process.env.ADMIN_EMAIL || process.env.EMAIL_FROM || 'admin@jfsemijoias.com';
+      const adminEmail = process.env.ADMIN_EMAIL || process.env.EMAIL_FROM || 'admin@jfsemijoias.com';
 
       const resumoProdutos = order.produtos
-        .map(
-          p => `<li>${p.nome} (x${p.quantidade}) — R$ ${(p.preco * p.quantidade).toFixed(2)}</li>`
-        )
+        .map(p => `<li>${p.nome} (x${p.quantidade}) — R$ ${(p.preco * p.quantidade).toFixed(2)}</li>`)
         .join('');
 
       const emailCliente = `
@@ -194,13 +191,14 @@ router.post('/mp/webhook', async (req, res) => {
         <h3>Itens:</h3>
         <ul>${resumoProdutos}</ul>
         <p>📦 Pedido ID: ${order._id}</p>
-        <p><a href="${process.env.FRONT_ORIGIN}/admin-rastreio.html">Gerenciar rastreio</a></p>
       `;
 
-      await enviarEmail(cliente.email, "Confirmação do seu pedido ✨", emailCliente);
-      await enviarEmail(adminEmail, "Novo pedido confirmado 🛍️", emailAdmin);
-
-      console.log(`📨 E-mails enviados para ${cliente.email} e ${adminEmail}.`);
+      try {
+        await enviarEmail(cliente.email, "Confirmação do seu pedido ✨", emailCliente);
+        await enviarEmail(adminEmail, "Novo pedido confirmado 🛍️", emailAdmin);
+      } catch (mailErr) {
+        console.warn('⚠️ Falha ao enviar e-mails:', mailErr.message);
+      }
     }
 
     await session.commitTransaction();
