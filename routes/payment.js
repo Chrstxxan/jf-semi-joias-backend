@@ -1,7 +1,7 @@
 // backend/routes/payment.js
 const express = require("express");
-const mercadopago = require("mercadopago");
 const mongoose = require("mongoose");
+const fetch = require("node-fetch");
 const Order = require("../models/Order");
 const Produto = require("../models/Produto");
 const User = require("../models/User");
@@ -11,36 +11,23 @@ const enviarEmail = require("../utils/mailer");
 const router = express.Router();
 
 // ================================
-// 🔧 CONFIGURAÇÃO DO SDK (PRODUÇÃO)
-// ================================
-const MP = new mercadopago.MercadoPagoConfig({
-  accessToken: process.env.MP_ACCESS_TOKEN,
-});
-const preferenceClient = new mercadopago.Preference(MP);
-const paymentClient = new mercadopago.Payment(MP);
-const merchantOrderClient = new mercadopago.MerchantOrder(MP);
-
-// ================================
 // 💳 CRIAR PREFERÊNCIA DE PAGAMENTO
 // ================================
 router.post("/mp/preference", auth, async (req, res) => {
   try {
-    let { itens, enderecoEntrega, frete } = req.body;
+    const { itens, enderecoEntrega, frete } = req.body;
     if (!itens || !Array.isArray(itens) || itens.length === 0) {
       return res.status(400).json({ erro: "Itens inválidos" });
     }
 
-    // Valida produtos e calcula subtotal
     let subtotal = 0;
     const itensValidados = [];
     for (const i of itens) {
       const p = await Produto.findById(String(i.produtoId).trim());
-      if (!p)
-        return res.status(400).json({ erro: `Produto inválido: ${i.produtoId}` });
+      if (!p) return res.status(400).json({ erro: `Produto inválido: ${i.produtoId}` });
 
       const qnt = Number(i.quantidade || 1);
       subtotal += p.preco * qnt;
-
       itensValidados.push({
         produtoId: p._id,
         nome: p.nome,
@@ -50,19 +37,15 @@ router.post("/mp/preference", auth, async (req, res) => {
       });
     }
 
-    // 🧪 Produto de teste (R$1) = sem frete
-    if (itensValidados.length === 1 && itensValidados[0].preco === 1) {
-      frete = 0;
-    }
+    const freteFinal =
+      itensValidados.length === 1 && itensValidados[0].preco === 1 ? 0 : Number(frete || 0);
+    const total = subtotal + freteFinal;
 
-    const total = subtotal + Number(frete || 0);
-
-    // 📦 Cria pedido
     const order = await Order.create({
       usuario: req.user.id,
       produtos: itensValidados,
       subtotal,
-      frete: Number(frete || 0),
+      frete: freteFinal,
       total,
       statusPagamento: "pendente",
       status: "pendente",
@@ -70,34 +53,42 @@ router.post("/mp/preference", auth, async (req, res) => {
     });
 
     const frontOrigin =
-      process.env.FRONT_ORIGIN?.trim().replace(/\/$/, "") ||
-      "http://127.0.0.1:5500";
+      process.env.FRONT_ORIGIN?.trim().replace(/\/$/, "") || "http://127.0.0.1:5500";
 
-    // 🧾 Cria preferência
-    const pref = await preferenceClient.create({
-      body: {
-        items: itensValidados.map((i) => ({
-          id: String(order._id),
-          title: i.nome,
-          quantity: i.quantidade,
-          unit_price: i.preco,
-          currency_id: "BRL",
-        })),
-        back_urls: {
-          success: `${frontOrigin}/index.html?pagamento=success`,
-          failure: `${frontOrigin}/index.html?pagamento=failure`,
-          pending: `${frontOrigin}/index.html?pagamento=pending`,
-        },
-        auto_return: "approved",
-        metadata: {
-          order_id: String(order._id),
-          user_id: String(req.user.id),
-          generated_at: new Date().toISOString(),
-        },
-        external_reference: String(order._id),
-        notification_url: `${process.env.BASE_URL}/payment/mp/webhook`,
+    const body = {
+      items: itensValidados.map((i) => ({
+        id: String(order._id),
+        title: i.nome,
+        quantity: i.quantidade,
+        unit_price: i.preco,
+        currency_id: "BRL",
+      })),
+      back_urls: {
+        success: `${frontOrigin}/index.html?pagamento=success`,
+        failure: `${frontOrigin}/index.html?pagamento=failure`,
+        pending: `${frontOrigin}/index.html?pagamento=pending`,
       },
+      auto_return: "approved",
+      metadata: {
+        order_id: String(order._id),
+        user_id: String(req.user.id),
+        generated_at: new Date().toISOString(),
+      },
+      external_reference: String(order._id),
+      notification_url: `${process.env.BASE_URL}/payment/mp/webhook`,
+    };
+
+    const resp = await fetch("https://api.mercadopago.com/checkout/preferences", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}`,
+      },
+      body: JSON.stringify(body),
     });
+
+    const pref = await resp.json();
+    if (!resp.ok) throw new Error(pref?.message || "Falha na criação da preferência");
 
     await Order.findByIdAndUpdate(order._id, { mpPreferenceId: pref.id });
 
@@ -123,32 +114,13 @@ router.post("/mp/webhook", async (req, res) => {
     console.log("📩 Webhook recebido:", JSON.stringify(req.body, null, 2));
 
     let pagamentoId = null;
-    let orderId = null;
-
     const { data, resource, topic } = req.body;
 
-    // Detecta ID do pagamento
+    // Detecta ID de pagamento
     if (data?.id) {
       pagamentoId = data.id;
     } else if (resource && resource.includes("payments")) {
       pagamentoId = resource.split("/").pop();
-    } else if (resource && resource.includes("merchant_orders")) {
-      const merchantId = resource.split("/").pop();
-      console.log(`🔍 Buscando merchant_order ${merchantId}...`);
-      try {
-        const merchant = await merchantOrderClient.get({ merchantOrderId: merchantId });
-        const payments = merchant.body?.payments || [];
-        const firstPayment =
-          payments.find((p) => p.status === "approved") || payments[0];
-        if (firstPayment) {
-          pagamentoId = firstPayment.id;
-          console.log(`✅ Pagamento encontrado na merchant_order: ${pagamentoId}`);
-        } else {
-          console.warn(`⚠️ Nenhum pagamento vinculado à merchant_order ${merchantId}`);
-        }
-      } catch (err) {
-        console.warn(`⚠️ Falha ao buscar merchant_order ${merchantId}:`, err.message);
-      }
     }
 
     if (!pagamentoId) {
@@ -160,64 +132,36 @@ router.post("/mp/webhook", async (req, res) => {
 
     console.log(`🔎 Buscando informações do pagamento ${pagamentoId}...`);
 
-    let paymentData = null;
-    try {
-      const payment = await paymentClient.get({ id: pagamentoId });
-      paymentData = payment?.body;
-    } catch (err) {
-      console.warn(`⚠️ Erro ao buscar pagamento ${pagamentoId}:`, err.message);
-    }
+    // 🔥 Busca direta na API do Mercado Pago (sem SDK)
+    const resp = await fetch(`https://api.mercadopago.com/v1/payments/${pagamentoId}`, {
+      headers: {
+        Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}`,
+        "User-Agent": "JF-SemiJoias-Server/1.0",
+      },
+    });
 
-    // Retry caso a resposta venha vazia (MP delay)
-    if (!paymentData || Object.keys(paymentData).length === 0) {
-      console.warn(`⚠️ Resposta vazia do MP para ${pagamentoId}, tentando novamente em 5s...`);
-      await new Promise((r) => setTimeout(r, 5000));
-      try {
-        const retryPayment = await paymentClient.get({ id: pagamentoId });
-        paymentData = retryPayment?.body;
-      } catch (err) {
-        console.warn(`⚠️ Ainda vazio após retry: ${err.message}`);
-      }
-    }
-
-    // Fallback: busca por merchant_order
-    if (!paymentData) {
-      try {
-        const merchantOrders = await merchantOrderClient.search({
-          qs: { external_reference: pagamentoId },
-        });
-        const mo = merchantOrders?.body?.elements?.[0];
-        const firstPayment = mo?.payments?.[0];
-        if (firstPayment) {
-          paymentData = firstPayment;
-          console.log(`✅ Fallback bem-sucedido via merchant_order`);
-        }
-      } catch (err) {
-        console.warn(`⚠️ Fallback falhou:`, err.message);
-      }
-    }
-
-    if (!paymentData) {
-      console.warn(`⚠️ Nenhum dado de pagamento encontrado (${pagamentoId}). Delay provável.`);
+    const paymentData = await resp.json();
+    if (!resp.ok || !paymentData?.id) {
+      console.warn(`⚠️ Falha ao buscar pagamento ${pagamentoId}:`, paymentData);
       await session.abortTransaction();
       session.endSession();
       return res.sendStatus(200);
     }
 
-    // Captura orderId por diferentes fontes
-    orderId =
+    const orderId =
       paymentData.metadata?.order_id ||
       paymentData.metadata?.orderId ||
       paymentData.external_reference;
 
     if (!orderId) {
-      console.warn("⚠️ Pagamento sem referência de pedido:", paymentData.id);
+      console.warn("⚠️ Pagamento sem referência de pedido:", pagamentoId);
       await session.abortTransaction();
       session.endSession();
       return res.sendStatus(200);
     }
 
     const mpStatus = paymentData.status;
+    console.log(`💳 Status do pagamento ${pagamentoId}: ${mpStatus}`);
 
     const order = await Order.findById(orderId).populate("usuario").session(session);
     if (!order) {
@@ -295,7 +239,7 @@ router.post("/mp/webhook", async (req, res) => {
 
     await session.commitTransaction();
     session.endSession();
-    console.log(`✅ Pedido ${orderId} atualizado: ${statusPagamento}`);
+    console.log(`✅ Pedido ${orderId} atualizado para: ${statusPagamento}`);
     res.sendStatus(200);
   } catch (e) {
     console.error("💥 Erro no webhook (rollback ativado):", e);
