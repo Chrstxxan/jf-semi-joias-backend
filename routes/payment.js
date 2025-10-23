@@ -1,4 +1,3 @@
-// backend/routes/payment.js
 const express = require('express');
 const mercadopago = require('mercadopago');
 const mongoose = require('mongoose');
@@ -17,10 +16,10 @@ const MP = new mercadopago.MercadoPagoConfig({
   accessToken: process.env.MP_ACCESS_TOKEN
 });
 const preferenceClient = new mercadopago.Preference(MP);
+const paymentClient = new mercadopago.Payment(MP);
 
 // ================================
 // 💳 CRIAR PREFERÊNCIA DE PAGAMENTO
-// (Cria o pedido ANTES de abrir o MP, e envia metadata.orderId)
 // ================================
 router.post('/mp/preference', auth, async (req, res) => {
   try {
@@ -29,9 +28,9 @@ router.post('/mp/preference', auth, async (req, res) => {
       return res.status(400).json({ erro: 'Itens inválidos' });
     }
 
-    // Busca produtos e valida
     let subtotal = 0;
     const itensValidados = [];
+
     for (const i of itens) {
       const p = await Produto.findById(String(i.produtoId).trim());
       if (!p) return res.status(400).json({ erro: `Produto inválido: ${i.produtoId}` });
@@ -48,14 +47,12 @@ router.post('/mp/preference', auth, async (req, res) => {
       });
     }
 
-    // 🧪 Se for o produto de teste de R$1, zera o frete
-    if (itensValidados.length === 1 && itensValidados[0].preco === 1) {
-      frete = 0;
-    }
+    // 🧪 Produto de teste → zera o frete
+    if (itensValidados.length === 1 && itensValidados[0].preco === 1) frete = 0;
 
     const total = subtotal + Number(frete || 0);
 
-    // 📦 Cria pedido
+    // 📦 Cria pedido no banco
     const order = await Order.create({
       usuario: req.user.id,
       produtos: itensValidados,
@@ -64,17 +61,17 @@ router.post('/mp/preference', auth, async (req, res) => {
       total,
       statusPagamento: 'pendente',
       status: 'pendente',
-      enderecoEntrega, // 👈 já com nome e telefone
+      enderecoEntrega
     });
 
     const frontOrigin =
       process.env.FRONT_ORIGIN?.trim().replace(/\/$/, '') || 'http://127.0.0.1:5500';
 
-    // 🧾 Cria preferência no Mercado Pago
+    // 🧾 Cria preferência MP
     const pref = await preferenceClient.create({
       body: {
         items: itensValidados.map(i => ({
-          id: String(order._id), // 👈 opcional, mas útil
+          id: String(order._id),
           title: i.nome,
           quantity: i.quantidade,
           unit_price: i.preco,
@@ -86,7 +83,7 @@ router.post('/mp/preference', auth, async (req, res) => {
           pending: `${frontOrigin}/index.html?pagamento=pending`
         },
         auto_return: 'approved',
-        metadata: { orderId: String(order._id) }, // 👈 usado no webhook
+        metadata: { orderId: String(order._id) },
         notification_url: `${process.env.BASE_URL}/payment/mp/webhook`
       }
     });
@@ -105,32 +102,31 @@ router.post('/mp/preference', auth, async (req, res) => {
 });
 
 // ================================
-// 📩 WEBHOOK (corrigido e robusto)
-// Mapeia status do MP -> PT-BR e atualiza o pedido
+// 📩 WEBHOOK (atualiza status do pedido)
 // ================================
 router.post('/mp/webhook', async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
 
   try {
-    console.log('📩 Webhook recebido:', JSON.stringify(req.body, null, 2));
-
-    // O Mercado Pago envia payloads diferentes (payment, merchant_order etc)
     const evento = req.body;
+    console.log('📩 Webhook recebido:', JSON.stringify(evento, null, 2));
+
+    // ================================
+    // Extrai ID do pagamento (aceita vários formatos)
+    // ================================
     let pagamentoId = null;
 
-      if (evento.data?.id) {
-        pagamentoId = evento.data.id; // novo formato
-      } else if (evento.resource && !isNaN(Number(evento.resource))) {
-        pagamentoId = evento.resource; // caso: "resource": "130957975378"
-      } else if (typeof evento.resource === 'string' && evento.resource.includes('/payments/')) {
-        pagamentoId = evento.resource.split('/payments/')[1]; // caso: URL completa
-      } else if (evento.id && !isNaN(Number(evento.id))) {
-        pagamentoId = evento.id; // fallback
-      }
-    let topico = evento.type || evento.topic;
+    if (evento.data?.id) {
+      pagamentoId = evento.data.id; // formato novo
+    } else if (evento.resource && !isNaN(Number(evento.resource))) {
+      pagamentoId = evento.resource; // ex: "130957975378"
+    } else if (typeof evento.resource === 'string' && evento.resource.includes('/payments/')) {
+      pagamentoId = evento.resource.split('/payments/')[1]; // ex: URL completa
+    } else if (evento.id && !isNaN(Number(evento.id))) {
+      pagamentoId = evento.id; // fallback
+    }
 
-    // Se não houver ID, ignora
     if (!pagamentoId) {
       console.warn('⚠️ Webhook recebido sem ID válido:', evento);
       await session.abortTransaction();
@@ -138,20 +134,21 @@ router.post('/mp/webhook', async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // Ignora outros tipos de evento que não sejam payment
-    if (topico && topico !== 'payment') {
-      console.log(`ℹ️ Evento ignorado (${topico})`);
+    // ================================
+    // Busca detalhes do pagamento
+    // ================================
+    let payment;
+    try {
+      payment = await paymentClient.get({ id: pagamentoId });
+    } catch (err) {
+      console.warn(`⚠️ Nenhum pagamento encontrado para ID ${pagamentoId}. Pode ser delay da API.`);
       await session.abortTransaction();
       session.endSession();
-      return res.sendStatus(200);
+      return res.sendStatus(200); // MP reenviará automaticamente
     }
 
-    // Busca o pagamento no MP
-    const paymentClient = new mercadopago.Payment(MP);
-    const payment = await paymentClient.get({ id: pagamentoId });
-
     if (!payment?.body) {
-      console.warn(`⚠️ Nenhum pagamento encontrado para ID ${pagamentoId}`);
+      console.warn(`⚠️ Resposta vazia do MP para o pagamento ${pagamentoId}`);
       await session.abortTransaction();
       session.endSession();
       return res.sendStatus(200);
@@ -161,7 +158,7 @@ router.post('/mp/webhook', async (req, res) => {
     const orderId = payment.body.metadata?.orderId;
 
     if (!orderId) {
-      console.warn(`⚠️ Pagamento sem orderId associado (ID ${pagamentoId})`);
+      console.warn(`⚠️ Pagamento ${pagamentoId} sem metadata.orderId`);
       await session.abortTransaction();
       session.endSession();
       return res.sendStatus(200);
@@ -175,7 +172,9 @@ router.post('/mp/webhook', async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // 🎯 Mapeia status para PT-BR
+    // ================================
+    // Atualiza status no MongoDB
+    // ================================
     const statusPagamento =
       mpStatus === 'approved'
         ? 'pago'
@@ -185,13 +184,14 @@ router.post('/mp/webhook', async (req, res) => {
 
     order.statusPagamento = statusPagamento;
     order.status = statusPagamento === 'pago' ? 'pago' : order.status;
-
     await order.save({ session });
 
+    // ================================
+    // Se aprovado, atualiza estoque + envia e-mails
+    // ================================
     if (statusPagamento === 'pago') {
       console.log(`💰 Pagamento aprovado para pedido ${orderId}`);
 
-      // 🔻 Decrementa estoque
       for (const item of order.produtos) {
         const produto = await Produto.findById(item.produtoId).session(session);
         if (produto) {
@@ -200,13 +200,16 @@ router.post('/mp/webhook', async (req, res) => {
         }
       }
 
-      // 📧 E-mails (cliente + admin)
+      // Envio de e-mails
       const cliente = order.usuario;
       const endereco = order.enderecoEntrega;
-      const adminEmail = process.env.ADMIN_EMAIL || process.env.EMAIL_FROM || 'admin@jfsemijoias.com';
+      const adminEmail =
+        process.env.ADMIN_EMAIL || process.env.EMAIL_FROM || 'admin@jfsemijoias.com';
 
       const resumoProdutos = order.produtos
-        .map(p => `<li>${p.nome} (x${p.quantidade}) — R$ ${(p.preco * p.quantidade).toFixed(2)}</li>`)
+        .map(
+          p => `<li>${p.nome} (x${p.quantidade}) — R$ ${(p.preco * p.quantidade).toFixed(2)}</li>`
+        )
         .join('');
 
       const emailCliente = `
@@ -230,9 +233,8 @@ router.post('/mp/webhook', async (req, res) => {
       `;
 
       try {
-        await enviarEmail(cliente.email, "Confirmação do seu pedido ✨", emailCliente);
-        await enviarEmail(adminEmail, "Novo pedido confirmado 🛍️", emailAdmin);
-        console.log(`📨 E-mails enviados para ${cliente.email} e ${adminEmail}.`);
+        await enviarEmail(cliente.email, 'Confirmação do seu pedido ✨', emailCliente);
+        await enviarEmail(adminEmail, 'Novo pedido confirmado 🛍️', emailAdmin);
       } catch (mailErr) {
         console.warn('⚠️ Falha ao enviar e-mails:', mailErr.message);
       }
