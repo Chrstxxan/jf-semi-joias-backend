@@ -7,6 +7,7 @@ const Produto = require("../models/Produto");
 const User = require("../models/User");
 const auth = require("../middleware/auth");
 const enviarEmail = require("../utils/mailer");
+const fetch = require("node-fetch");
 
 const router = express.Router();
 
@@ -17,7 +18,6 @@ const MP = new mercadopago.MercadoPagoConfig({
   accessToken: process.env.MP_ACCESS_TOKEN,
 });
 const preferenceClient = new mercadopago.Preference(MP);
-const paymentClient = new mercadopago.Payment(MP);
 const merchantOrderClient = new mercadopago.MerchantOrder(MP);
 
 // ================================
@@ -108,26 +108,6 @@ router.post("/mp/preference", auth, async (req, res) => {
 });
 
 // ================================
-// 🧠 Função auxiliar — tenta buscar o pagamento até 3x
-// ================================
-async function tentarBuscarPagamento(paymentClient, id, tentativas = 3) {
-  for (let i = 0; i < tentativas; i++) {
-    try {
-      const r = await paymentClient.get({ id });
-      if (r?.body && Object.keys(r.body).length > 0) {
-        if (i > 0) console.log(`✅ Pagamento ${id} encontrado na tentativa ${i + 1}`);
-        return r.body;
-      }
-    } catch (err) {
-      console.warn(`⚠️ Tentativa ${i + 1} falhou ao buscar pagamento ${id}: ${err.message}`);
-    }
-    await new Promise((r) => setTimeout(r, 3000)); // espera 3s antes de tentar de novo
-  }
-  console.warn(`❌ Todas as tentativas falharam para pagamento ${id}`);
-  return null;
-}
-
-// ================================
 // 📩 WEBHOOK MERCADO PAGO
 // ================================
 router.post("/mp/webhook", async (req, res) => {
@@ -140,9 +120,9 @@ router.post("/mp/webhook", async (req, res) => {
     let pagamentoId = null;
     let orderId = null;
 
-    // Detecta tipo de evento
-    const { data, resource } = req.body;
+    const { data, resource, topic } = req.body;
 
+    // Detecta tipo de evento
     if (data?.id) {
       pagamentoId = data.id;
     } else if (resource && resource.includes("payments")) {
@@ -172,10 +152,27 @@ router.post("/mp/webhook", async (req, res) => {
     }
 
     console.log(`🔎 Buscando informações do pagamento ${pagamentoId}...`);
-    let paymentData = await tentarBuscarPagamento(paymentClient, pagamentoId);
+    let paymentData = null;
 
-    // 🧩 Fallback via merchant_order
-    if (!paymentData) {
+    try {
+      // 🚀 Busca direta via API (substitui o SDK bugado)
+      const response = await fetch(`https://api.mercadopago.com/v1/payments/${pagamentoId}`, {
+        headers: {
+          Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}`,
+        },
+      });
+      if (response.ok) {
+        paymentData = await response.json();
+      } else {
+        console.warn(`⚠️ Falha ao buscar pagamento (status ${response.status})`);
+      }
+    } catch (err) {
+      console.warn(`⚠️ Erro ao buscar pagamento ${pagamentoId}:`, err.message);
+    }
+
+    // 🧩 Fallback pra merchant_order se vier vazio
+    if (!paymentData || Object.keys(paymentData).length === 0) {
+      console.warn(`⚠️ Resposta vazia do MP para o pagamento ${pagamentoId}`);
       try {
         const merchantOrders = await merchantOrderClient.search({ qs: { external_reference: pagamentoId } });
         if (merchantOrders?.body?.elements?.length) {
@@ -192,7 +189,7 @@ router.post("/mp/webhook", async (req, res) => {
     }
 
     if (!paymentData) {
-      console.warn(`⚠️ Nenhum pagamento encontrado para ID ${pagamentoId}. Pode ser delay da API.`);
+      console.warn(`❌ Todas as tentativas falharam para pagamento ${pagamentoId}`);
       await session.abortTransaction();
       session.endSession();
       return res.sendStatus(200);
