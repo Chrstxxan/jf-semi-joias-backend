@@ -1,3 +1,4 @@
+// backend/routes/payment.js
 const express = require('express');
 const mercadopago = require('mercadopago');
 const mongoose = require('mongoose');
@@ -17,9 +18,11 @@ const MP = new mercadopago.MercadoPagoConfig({
 });
 const preferenceClient = new mercadopago.Preference(MP);
 const paymentClient = new mercadopago.Payment(MP);
+const merchantOrderClient = new mercadopago.MerchantOrder(MP);
 
 // ================================
 // 💳 CRIAR PREFERÊNCIA DE PAGAMENTO
+// (Cria o pedido ANTES de abrir o MP, e envia metadata.orderId)
 // ================================
 router.post('/mp/preference', auth, async (req, res) => {
   try {
@@ -28,9 +31,9 @@ router.post('/mp/preference', auth, async (req, res) => {
       return res.status(400).json({ erro: 'Itens inválidos' });
     }
 
+    // Busca produtos e valida
     let subtotal = 0;
     const itensValidados = [];
-
     for (const i of itens) {
       const p = await Produto.findById(String(i.produtoId).trim());
       if (!p) return res.status(400).json({ erro: `Produto inválido: ${i.produtoId}` });
@@ -47,12 +50,14 @@ router.post('/mp/preference', auth, async (req, res) => {
       });
     }
 
-    // 🧪 Produto de teste → zera o frete
-    if (itensValidados.length === 1 && itensValidados[0].preco === 1) frete = 0;
+    // 🧪 Se for o produto de teste de R$1, zera o frete
+    if (itensValidados.length === 1 && itensValidados[0].preco === 1) {
+      frete = 0;
+    }
 
     const total = subtotal + Number(frete || 0);
 
-    // 📦 Cria pedido no banco
+    // 📦 Cria pedido
     const order = await Order.create({
       usuario: req.user.id,
       produtos: itensValidados,
@@ -61,17 +66,17 @@ router.post('/mp/preference', auth, async (req, res) => {
       total,
       statusPagamento: 'pendente',
       status: 'pendente',
-      enderecoEntrega
+      enderecoEntrega, // 👈 já com nome e telefone
     });
 
     const frontOrigin =
       process.env.FRONT_ORIGIN?.trim().replace(/\/$/, '') || 'http://127.0.0.1:5500';
 
-    // 🧾 Cria preferência MP
+    // 🧾 Cria preferência no Mercado Pago
     const pref = await preferenceClient.create({
       body: {
         items: itensValidados.map(i => ({
-          id: String(order._id),
+          id: String(order._id),                // 👈 opcional, mas útil
           title: i.nome,
           quantity: i.quantidade,
           unit_price: i.preco,
@@ -83,7 +88,7 @@ router.post('/mp/preference', auth, async (req, res) => {
           pending: `${frontOrigin}/index.html?pagamento=pending`
         },
         auto_return: 'approved',
-        metadata: { orderId: String(order._id) },
+        metadata: { orderId: String(order._id) }, // 👈 usado no webhook
         notification_url: `${process.env.BASE_URL}/payment/mp/webhook`
       }
     });
@@ -102,63 +107,67 @@ router.post('/mp/preference', auth, async (req, res) => {
 });
 
 // ================================
-// 📩 WEBHOOK (atualiza status do pedido)
+// 📩 WEBHOOK
+// Mapeia status do MP -> PT-BR e atualiza o pedido
 // ================================
 router.post('/mp/webhook', async (req, res) => {
+  console.log('📩 Webhook recebido:', JSON.stringify(req.body, null, 2));
+
   const session = await mongoose.startSession();
   session.startTransaction();
 
   try {
-    const evento = req.body;
-    console.log('📩 Webhook recebido:', JSON.stringify(evento, null, 2));
+    const { topic, type, data, resource } = req.body;
+    let paymentId = null;
 
-    // ================================
-    // Extrai ID do pagamento (aceita vários formatos)
-    // ================================
-    let pagamentoId = null;
-
-    if (evento.data?.id) {
-      pagamentoId = evento.data.id; // formato novo
-    } else if (evento.resource && !isNaN(Number(evento.resource))) {
-      pagamentoId = evento.resource; // ex: "130957975378"
-    } else if (typeof evento.resource === 'string' && evento.resource.includes('/payments/')) {
-      pagamentoId = evento.resource.split('/payments/')[1]; // ex: URL completa
-    } else if (evento.id && !isNaN(Number(evento.id))) {
-      pagamentoId = evento.id; // fallback
+    // Detecta formato da notificação
+    if (data?.id) {
+      paymentId = data.id;
+    } else if (typeof resource === 'string' && resource.includes('/payments/')) {
+      paymentId = resource.split('/payments/')[1];
+    } else if (typeof resource === 'string' && /^[0-9]+$/.test(resource)) {
+      paymentId = resource;
     }
 
-    if (!pagamentoId) {
-      console.warn('⚠️ Webhook recebido sem ID válido:', evento);
+    // 🧩 Caso venha como merchant_order
+    if (!paymentId && (topic === 'merchant_order' || type === 'merchant_order')) {
+      const orderIdMatch = resource?.match(/merchant_orders\/(\d+)/);
+      const merchantOrderId = orderIdMatch ? orderIdMatch[1] : null;
+
+      if (merchantOrderId) {
+        console.log(`🔍 Buscando merchant_order ${merchantOrderId}...`);
+        const merchantOrder = await merchantOrderClient.get({ merchantOrderId });
+        if (merchantOrder.body.payments?.length) {
+          paymentId = merchantOrder.body.payments[0].id;
+          console.log(`✅ Pagamento encontrado dentro da merchant_order: ${paymentId}`);
+        } else {
+          console.warn(`⚠️ Nenhum pagamento vinculado à merchant_order ${merchantOrderId}`);
+        }
+      }
+    }
+
+    if (!paymentId) {
+      console.warn('⚠️ Webhook recebido sem ID válido:', req.body);
       await session.abortTransaction();
       session.endSession();
       return res.sendStatus(200);
     }
 
-    // ================================
-    // Busca detalhes do pagamento
-    // ================================
-    let payment;
-    try {
-      payment = await paymentClient.get({ id: pagamentoId });
-    } catch (err) {
-      console.warn(`⚠️ Nenhum pagamento encontrado para ID ${pagamentoId}. Pode ser delay da API.`);
-      await session.abortTransaction();
-      session.endSession();
-      return res.sendStatus(200); // MP reenviará automaticamente
-    }
+    console.log(`🔎 Buscando informações do pagamento ${paymentId}...`);
+    const payment = await paymentClient.get({ id: paymentId });
 
-    if (!payment?.body) {
-      console.warn(`⚠️ Resposta vazia do MP para o pagamento ${pagamentoId}`);
+    if (!payment.body) {
+      console.warn(`⚠️ Resposta vazia do MP para o pagamento ${paymentId}`);
       await session.abortTransaction();
       session.endSession();
       return res.sendStatus(200);
     }
 
-    const mpStatus = payment.body.status; // approved, pending, rejected
+    const mpStatus = payment.body.status;
     const orderId = payment.body.metadata?.orderId;
 
     if (!orderId) {
-      console.warn(`⚠️ Pagamento ${pagamentoId} sem metadata.orderId`);
+      console.warn(`⚠️ Pagamento ${paymentId} sem metadata.orderId`);
       await session.abortTransaction();
       session.endSession();
       return res.sendStatus(200);
@@ -172,9 +181,7 @@ router.post('/mp/webhook', async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // ================================
-    // Atualiza status no MongoDB
-    // ================================
+    // 🎯 Mapeia status para PT-BR
     const statusPagamento =
       mpStatus === 'approved'
         ? 'pago'
@@ -183,28 +190,25 @@ router.post('/mp/webhook', async (req, res) => {
         : 'pendente';
 
     order.statusPagamento = statusPagamento;
+    // Convenção: status do pedido segue statusPagamento (pode ser ajustado depois)
     order.status = statusPagamento === 'pago' ? 'pago' : order.status;
+
     await order.save({ session });
 
-    // ================================
-    // Se aprovado, atualiza estoque + envia e-mails
-    // ================================
     if (statusPagamento === 'pago') {
-      console.log(`💰 Pagamento aprovado para pedido ${orderId}`);
-
+      // 🔻 Decrementa estoque
       for (const item of order.produtos) {
-        const produto = await Produto.findById(item.produtoId).session(session);
+        const produto = await require('../models/Produto').findById(item.produtoId).session(session);
         if (produto) {
           produto.estoque = Math.max(0, (produto.estoque || 0) - item.quantidade);
           await produto.save({ session });
         }
       }
 
-      // Envio de e-mails
+      // 📧 E-mails (cliente + admin)
       const cliente = order.usuario;
       const endereco = order.enderecoEntrega;
-      const adminEmail =
-        process.env.ADMIN_EMAIL || process.env.EMAIL_FROM || 'admin@jfsemijoias.com';
+      const adminEmail = process.env.ADMIN_EMAIL || process.env.EMAIL_FROM || 'admin@jfsemijoias.com';
 
       const resumoProdutos = order.produtos
         .map(
@@ -233,8 +237,8 @@ router.post('/mp/webhook', async (req, res) => {
       `;
 
       try {
-        await enviarEmail(cliente.email, 'Confirmação do seu pedido ✨', emailCliente);
-        await enviarEmail(adminEmail, 'Novo pedido confirmado 🛍️', emailAdmin);
+        await enviarEmail(cliente.email, "Confirmação do seu pedido ✨", emailCliente);
+        await enviarEmail(adminEmail, "Novo pedido confirmado 🛍️", emailAdmin);
       } catch (mailErr) {
         console.warn('⚠️ Falha ao enviar e-mails:', mailErr.message);
       }
