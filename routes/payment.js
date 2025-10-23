@@ -137,8 +137,11 @@ router.post('/mp/webhook', async (req, res) => {
       if (merchantOrderId) {
         console.log(`🔍 Buscando merchant_order ${merchantOrderId}...`);
         const merchantOrder = await merchantOrderClient.get({ merchantOrderId });
-        if (merchantOrder.body.payments?.length) {
-          paymentId = merchantOrder.body.payments[0].id;
+
+        const orderBody = merchantOrder.body || merchantOrder; // ✅ fallback seguro
+
+        if (orderBody.payments?.length) {
+          paymentId = orderBody.payments[0].id;
           console.log(`✅ Pagamento encontrado dentro da merchant_order: ${paymentId}`);
         } else {
           console.warn(`⚠️ Nenhum pagamento vinculado à merchant_order ${merchantOrderId}`);
