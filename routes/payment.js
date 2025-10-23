@@ -117,7 +117,17 @@ router.post('/mp/webhook', async (req, res) => {
 
     // O Mercado Pago envia payloads diferentes (payment, merchant_order etc)
     const evento = req.body;
-    let pagamentoId = evento.data?.id || evento.id;
+    let pagamentoId = null;
+
+      if (evento.data?.id) {
+        pagamentoId = evento.data.id; // novo formato
+      } else if (evento.resource && !isNaN(Number(evento.resource))) {
+        pagamentoId = evento.resource; // caso: "resource": "130957975378"
+      } else if (typeof evento.resource === 'string' && evento.resource.includes('/payments/')) {
+        pagamentoId = evento.resource.split('/payments/')[1]; // caso: URL completa
+      } else if (evento.id && !isNaN(Number(evento.id))) {
+        pagamentoId = evento.id; // fallback
+      }
     let topico = evento.type || evento.topic;
 
     // Se não houver ID, ignora
