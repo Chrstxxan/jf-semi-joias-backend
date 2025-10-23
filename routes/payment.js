@@ -108,6 +108,26 @@ router.post("/mp/preference", auth, async (req, res) => {
 });
 
 // ================================
+// 🧠 Função auxiliar — tenta buscar o pagamento até 3x
+// ================================
+async function tentarBuscarPagamento(paymentClient, id, tentativas = 3) {
+  for (let i = 0; i < tentativas; i++) {
+    try {
+      const r = await paymentClient.get({ id });
+      if (r?.body && Object.keys(r.body).length > 0) {
+        if (i > 0) console.log(`✅ Pagamento ${id} encontrado na tentativa ${i + 1}`);
+        return r.body;
+      }
+    } catch (err) {
+      console.warn(`⚠️ Tentativa ${i + 1} falhou ao buscar pagamento ${id}: ${err.message}`);
+    }
+    await new Promise((r) => setTimeout(r, 3000)); // espera 3s antes de tentar de novo
+  }
+  console.warn(`❌ Todas as tentativas falharam para pagamento ${id}`);
+  return null;
+}
+
+// ================================
 // 📩 WEBHOOK MERCADO PAGO
 // ================================
 router.post("/mp/webhook", async (req, res) => {
@@ -121,7 +141,7 @@ router.post("/mp/webhook", async (req, res) => {
     let orderId = null;
 
     // Detecta tipo de evento
-    const { data, resource, topic } = req.body;
+    const { data, resource } = req.body;
 
     if (data?.id) {
       pagamentoId = data.id;
@@ -152,18 +172,10 @@ router.post("/mp/webhook", async (req, res) => {
     }
 
     console.log(`🔎 Buscando informações do pagamento ${pagamentoId}...`);
+    let paymentData = await tentarBuscarPagamento(paymentClient, pagamentoId);
 
-    let paymentData = null;
-    try {
-      const payment = await paymentClient.get({ id: pagamentoId });
-      paymentData = payment?.body;
-    } catch (err) {
-      console.warn(`⚠️ Falha ao buscar pagamento ${pagamentoId}:`, err.message);
-    }
-
-    // 🧩 Fallback pra merchant_order se vier vazio
-    if (!paymentData || Object.keys(paymentData).length === 0) {
-      console.warn(`⚠️ Resposta vazia do MP para o pagamento ${pagamentoId}`);
+    // 🧩 Fallback via merchant_order
+    if (!paymentData) {
       try {
         const merchantOrders = await merchantOrderClient.search({ qs: { external_reference: pagamentoId } });
         if (merchantOrders?.body?.elements?.length) {
