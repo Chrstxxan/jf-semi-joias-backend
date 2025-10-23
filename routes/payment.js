@@ -1,6 +1,7 @@
 // backend/routes/payment.js
 const express = require("express");
 const mongoose = require("mongoose");
+const fetch = require("node-fetch");
 const Order = require("../models/Order");
 const Produto = require("../models/Produto");
 const User = require("../models/User");
@@ -9,9 +10,8 @@ const enviarEmail = require("../utils/mailer");
 
 const router = express.Router();
 
-// Utilitários
+// ============ Utils ============
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-
 async function mpFetch(path, options = {}) {
   const url = `https://api.mercadopago.com${path}`;
   const resp = await fetch(url, {
@@ -169,7 +169,6 @@ router.post("/mp/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // Idempotência simples
     if (order.lastPaymentId === String(pagamentoId) && order.statusPagamento === "pago") {
       console.log(`ℹ️ Pagamento ${pagamentoId} já processado`);
       await session.abortTransaction();
@@ -198,11 +197,10 @@ router.post("/mp/webhook", async (req, res) => {
     await session.commitTransaction();
     session.endSession();
 
-    // ================================
-    // 📧 E-mails (fora da transação)
-    // ================================
+    // ========== Emails fora da transação ==========
     try {
       if (statusPagamento === "pago") {
+        console.log("🧩 Entrando no bloco de e-mail pós-pagamento...");
         const cliente = order.usuario || {};
         const endereco = order.enderecoEntrega || {};
         const adminEmail =
@@ -219,7 +217,7 @@ router.post("/mp/webhook", async (req, res) => {
 
         const emailCliente = `
           <h2>💖 Pedido confirmado!</h2>
-          <p>Olá, ${cliente.nome || "cliente"}! Seu pedido foi confirmado.</p>
+          <p>Olá, ${cliente.nome || "cliente"}! Seu pedido foi confirmado e logo será enviado.</p>
           <ul>${resumoProdutos}</ul>
           <p><b>Total:</b> R$ ${Number(order.total || 0).toFixed(2)}</p>
           <p><b>Endereço:</b> ${[
@@ -243,19 +241,25 @@ router.post("/mp/webhook", async (req, res) => {
         `;
 
         try {
-          if (cliente.email)
+          if (cliente.email) {
             await enviarEmail(cliente.email, "Confirmação do seu pedido ✨", emailCliente);
+            console.log(`📨 E-mail enviado ao cliente: ${cliente.email}`);
+          }
         } catch (e1) {
-          console.warn("⚠️ Falha ao enviar e-mail cliente:", e1.message);
+          console.warn("❌ Erro ao enviar e-mail ao cliente:", e1.message);
         }
+
         try {
           await enviarEmail(adminEmail, "Novo pedido confirmado 🛍️", emailAdmin);
+          console.log(`📨 E-mail enviado ao admin: ${adminEmail}`);
         } catch (e2) {
-          console.warn("⚠️ Falha ao enviar e-mail admin:", e2.message);
+          console.warn("❌ Erro ao enviar e-mail ao admin:", e2.message);
         }
+
+        console.log("✅ E-mails enviados (ou ignorados). Pedido finalizado.");
       }
     } catch (mailErr) {
-      console.warn("⚠️ Falha geral no bloco de e-mails:", mailErr.message);
+      console.warn("⚠️ Falha geral no bloco de e-mail:", mailErr.message);
     }
 
     console.log(`✅ Pedido ${order._id} atualizado para: ${statusPagamento}`);
