@@ -7,7 +7,6 @@ const Produto = require("../models/Produto");
 const User = require("../models/User");
 const auth = require("../middleware/auth");
 const enviarEmail = require("../utils/mailer");
-const fetch = require("node-fetch");
 
 const router = express.Router();
 
@@ -18,6 +17,7 @@ const MP = new mercadopago.MercadoPagoConfig({
   accessToken: process.env.MP_ACCESS_TOKEN,
 });
 const preferenceClient = new mercadopago.Preference(MP);
+const paymentClient = new mercadopago.Payment(MP);
 const merchantOrderClient = new mercadopago.MerchantOrder(MP);
 
 // ================================
@@ -89,7 +89,7 @@ router.post("/mp/preference", auth, async (req, res) => {
           pending: `${frontOrigin}/index.html?pagamento=pending`,
         },
         auto_return: "approved",
-        metadata: { orderId: String(order._id) },
+        metadata: { order_id: String(order._id) }, // 🔄 Corrigido: usa "order_id"
         notification_url: `${process.env.BASE_URL}/payment/mp/webhook`,
       },
     });
@@ -120,9 +120,9 @@ router.post("/mp/webhook", async (req, res) => {
     let pagamentoId = null;
     let orderId = null;
 
+    // Detecta tipo de evento
     const { data, resource, topic } = req.body;
 
-    // Detecta tipo de evento
     if (data?.id) {
       pagamentoId = data.id;
     } else if (resource && resource.includes("payments")) {
@@ -152,22 +152,13 @@ router.post("/mp/webhook", async (req, res) => {
     }
 
     console.log(`🔎 Buscando informações do pagamento ${pagamentoId}...`);
-    let paymentData = null;
 
+    let paymentData = null;
     try {
-      // 🚀 Busca direta via API (substitui o SDK bugado)
-      const response = await fetch(`https://api.mercadopago.com/v1/payments/${pagamentoId}`, {
-        headers: {
-          Authorization: `Bearer ${process.env.MP_ACCESS_TOKEN}`,
-        },
-      });
-      if (response.ok) {
-        paymentData = await response.json();
-      } else {
-        console.warn(`⚠️ Falha ao buscar pagamento (status ${response.status})`);
-      }
+      const payment = await paymentClient.get({ id: pagamentoId });
+      paymentData = payment?.body;
     } catch (err) {
-      console.warn(`⚠️ Erro ao buscar pagamento ${pagamentoId}:`, err.message);
+      console.warn(`⚠️ Falha ao buscar pagamento ${pagamentoId}:`, err.message);
     }
 
     // 🧩 Fallback pra merchant_order se vier vazio
@@ -189,14 +180,14 @@ router.post("/mp/webhook", async (req, res) => {
     }
 
     if (!paymentData) {
-      console.warn(`❌ Todas as tentativas falharam para pagamento ${pagamentoId}`);
+      console.warn(`⚠️ Nenhum pagamento encontrado para ID ${pagamentoId}. Pode ser delay da API.`);
       await session.abortTransaction();
       session.endSession();
       return res.sendStatus(200);
     }
 
-    const mpStatus = paymentData.status;
-    orderId = paymentData.metadata?.orderId;
+    // ✅ Suporte tanto pra orderId quanto order_id
+    orderId = paymentData.metadata?.orderId || paymentData.metadata?.order_id;
 
     if (!orderId) {
       console.warn("⚠️ Pagamento sem metadata.orderId:", paymentData);
@@ -204,6 +195,8 @@ router.post("/mp/webhook", async (req, res) => {
       session.endSession();
       return res.sendStatus(200);
     }
+
+    const mpStatus = paymentData.status;
 
     const order = await Order.findById(orderId).populate("usuario").session(session);
     if (!order) {
