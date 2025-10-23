@@ -89,7 +89,12 @@ router.post("/mp/preference", auth, async (req, res) => {
           pending: `${frontOrigin}/index.html?pagamento=pending`,
         },
         auto_return: "approved",
-        metadata: { order_id: String(order._id) }, // 🔄 Corrigido: usa "order_id"
+        metadata: {
+          order_id: String(order._id),
+          user_id: String(req.user.id),
+          generated_at: new Date().toISOString(),
+        },
+        external_reference: String(order._id),
         notification_url: `${process.env.BASE_URL}/payment/mp/webhook`,
       },
     });
@@ -120,9 +125,9 @@ router.post("/mp/webhook", async (req, res) => {
     let pagamentoId = null;
     let orderId = null;
 
-    // Detecta tipo de evento
     const { data, resource, topic } = req.body;
 
+    // Detecta ID do pagamento
     if (data?.id) {
       pagamentoId = data.id;
     } else if (resource && resource.includes("payments")) {
@@ -132,10 +137,12 @@ router.post("/mp/webhook", async (req, res) => {
       console.log(`🔍 Buscando merchant_order ${merchantId}...`);
       try {
         const merchant = await merchantOrderClient.get({ merchantOrderId: merchantId });
-        const firstPayment = merchant.body?.payments?.[0];
+        const payments = merchant.body?.payments || [];
+        const firstPayment =
+          payments.find((p) => p.status === "approved") || payments[0];
         if (firstPayment) {
           pagamentoId = firstPayment.id;
-          console.log(`✅ Pagamento encontrado dentro da merchant_order: ${pagamentoId}`);
+          console.log(`✅ Pagamento encontrado na merchant_order: ${pagamentoId}`);
         } else {
           console.warn(`⚠️ Nenhum pagamento vinculado à merchant_order ${merchantId}`);
         }
@@ -145,7 +152,7 @@ router.post("/mp/webhook", async (req, res) => {
     }
 
     if (!pagamentoId) {
-      console.warn("⚠️ Webhook recebido sem ID válido:", req.body);
+      console.warn("⚠️ Webhook sem ID de pagamento válido:", req.body);
       await session.abortTransaction();
       session.endSession();
       return res.sendStatus(200);
@@ -158,39 +165,53 @@ router.post("/mp/webhook", async (req, res) => {
       const payment = await paymentClient.get({ id: pagamentoId });
       paymentData = payment?.body;
     } catch (err) {
-      console.warn(`⚠️ Falha ao buscar pagamento ${pagamentoId}:`, err.message);
+      console.warn(`⚠️ Erro ao buscar pagamento ${pagamentoId}:`, err.message);
     }
 
-    // 🧩 Fallback pra merchant_order se vier vazio
+    // Retry caso a resposta venha vazia (MP delay)
     if (!paymentData || Object.keys(paymentData).length === 0) {
-      console.warn(`⚠️ Resposta vazia do MP para o pagamento ${pagamentoId}`);
+      console.warn(`⚠️ Resposta vazia do MP para ${pagamentoId}, tentando novamente em 5s...`);
+      await new Promise((r) => setTimeout(r, 5000));
       try {
-        const merchantOrders = await merchantOrderClient.search({ qs: { external_reference: pagamentoId } });
-        if (merchantOrders?.body?.elements?.length) {
-          const mo = merchantOrders.body.elements[0];
-          const firstPayment = mo.payments?.[0];
-          if (firstPayment) {
-            paymentData = firstPayment;
-            console.log(`✅ Fallback bem-sucedido: pagamento ${pagamentoId} recuperado via merchant_order`);
-          }
+        const retryPayment = await paymentClient.get({ id: pagamentoId });
+        paymentData = retryPayment?.body;
+      } catch (err) {
+        console.warn(`⚠️ Ainda vazio após retry: ${err.message}`);
+      }
+    }
+
+    // Fallback: busca por merchant_order
+    if (!paymentData) {
+      try {
+        const merchantOrders = await merchantOrderClient.search({
+          qs: { external_reference: pagamentoId },
+        });
+        const mo = merchantOrders?.body?.elements?.[0];
+        const firstPayment = mo?.payments?.[0];
+        if (firstPayment) {
+          paymentData = firstPayment;
+          console.log(`✅ Fallback bem-sucedido via merchant_order`);
         }
       } catch (err) {
-        console.warn(`⚠️ Fallback falhou para pagamento ${pagamentoId}:`, err.message);
+        console.warn(`⚠️ Fallback falhou:`, err.message);
       }
     }
 
     if (!paymentData) {
-      console.warn(`⚠️ Nenhum pagamento encontrado para ID ${pagamentoId}. Pode ser delay da API.`);
+      console.warn(`⚠️ Nenhum dado de pagamento encontrado (${pagamentoId}). Delay provável.`);
       await session.abortTransaction();
       session.endSession();
       return res.sendStatus(200);
     }
 
-    // ✅ Suporte tanto pra orderId quanto order_id
-    orderId = paymentData.metadata?.orderId || paymentData.metadata?.order_id;
+    // Captura orderId por diferentes fontes
+    orderId =
+      paymentData.metadata?.order_id ||
+      paymentData.metadata?.orderId ||
+      paymentData.external_reference;
 
     if (!orderId) {
-      console.warn("⚠️ Pagamento sem metadata.orderId:", paymentData);
+      console.warn("⚠️ Pagamento sem referência de pedido:", paymentData.id);
       await session.abortTransaction();
       session.endSession();
       return res.sendStatus(200);
@@ -200,7 +221,7 @@ router.post("/mp/webhook", async (req, res) => {
 
     const order = await Order.findById(orderId).populate("usuario").session(session);
     if (!order) {
-      console.warn(`⚠️ Pedido ${orderId} não encontrado`);
+      console.warn(`⚠️ Pedido ${orderId} não encontrado no banco`);
       await session.abortTransaction();
       session.endSession();
       return res.sendStatus(200);
@@ -274,6 +295,7 @@ router.post("/mp/webhook", async (req, res) => {
 
     await session.commitTransaction();
     session.endSession();
+    console.log(`✅ Pedido ${orderId} atualizado: ${statusPagamento}`);
     res.sendStatus(200);
   } catch (e) {
     console.error("💥 Erro no webhook (rollback ativado):", e);
