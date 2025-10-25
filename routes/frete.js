@@ -1,3 +1,4 @@
+// backend/routes/frete.js
 const express = require("express");
 const fetch = require("node-fetch");
 const router = express.Router();
@@ -10,8 +11,10 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ erro: "CEP de destino inválido" });
     }
 
+    console.log("🧾 Calculando frete via correiosapi.app.br para:", cepDestino);
+
     const payload = {
-      sCepOrigem: "01001000", // CEP da loja
+      sCepOrigem: "05659000", // CEP da loja (ajusta pro teu)
       sCepDestino: cepDestino,
       nVlPeso: "1",
       nCdFormato: "1",
@@ -22,50 +25,51 @@ router.post("/", async (req, res) => {
       nVlDiametro: "0",
     };
 
-    console.log("🧾 Calculando frete para:", cepDestino);
-
-    // 🔹 1️⃣ Tenta via API moderna (proxy REST)
-    const resp = await fetch("https://api-frete-v2.correios.app.br/calcular", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-
     let resultado;
     try {
-      resultado = await resp.json();
-    } catch (err) {
-      console.warn("⚠️ Falha ao converter resposta da API:", err);
+      const response = await fetch("https://correiosapi.app.br/api/frete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) throw new Error(`Erro HTTP: ${response.status}`);
+      resultado = await response.json();
+      console.log("📦 Resultado API Correios:", resultado);
+    } catch (apiErr) {
+      console.warn("⚠️ Falha ao chamar API Correios:", apiErr.message);
+      resultado = null;
     }
 
-    if (resultado && resultado.Valor) {
-      const prazoCorreios = parseInt(resultado.PrazoEntrega) || 0;
-      const prazoMedio = prazoCorreios + 5;
-      const prazoMaximo = prazoCorreios + 10;
-
+    // Se a API falhar, usa fallback
+    if (!resultado || !resultado[0] || !resultado[0].Valor) {
+      console.warn("⚠️ Retorno inválido. Usando frete simulado.");
       return res.json({
-        Codigo: resultado.Codigo || "04014",
-        Valor: resultado.Valor,
-        PrazoCorreios: prazoCorreios,
-        PrazoMedio: prazoMedio,
-        PrazoMaximo: prazoMaximo,
-        MsgErro: resultado.MsgErro || "",
+        Codigo: "04014",
+        Valor: "24,90",
+        PrazoCorreios: 4,
+        PrazoMedio: 9,
+        PrazoMaximo: 14,
+        MsgErro: "Erro geral — usando simulação local",
       });
     }
 
-    // 🔹 2️⃣ Se a API falhar → fallback
-    console.warn("⚠️ API de frete falhou, usando simulação local.");
-    return res.json({
-      Codigo: "04014",
-      Valor: "24,90",
-      PrazoCorreios: 4,
-      PrazoMedio: 9, // 4 + 5
-      PrazoMaximo: 14, // 4 + 10
-      MsgErro: "Simulado (API fallback)",
+    const frete = resultado[0];
+    const prazoCorreios = Number(frete.PrazoEntrega || 0);
+    const prazoMedio = prazoCorreios + 5;
+    const prazoMaximo = prazoCorreios + 10;
+
+    res.json({
+      Codigo: frete.Codigo,
+      Valor: frete.Valor,
+      PrazoCorreios: prazoCorreios,
+      PrazoMedio: prazoMedio,
+      PrazoMaximo: prazoMaximo,
+      MsgErro: frete.MsgErro || "",
     });
   } catch (error) {
-    console.error("💥 Erro geral no cálculo de frete:", error.message || error);
-    return res.json({
+    console.error("💥 Erro ao calcular frete:", error.message);
+    res.json({
       Codigo: "04014",
       Valor: "24,90",
       PrazoCorreios: 4,
