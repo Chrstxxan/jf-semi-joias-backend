@@ -21,7 +21,7 @@ router.post("/", async (req, res) => {
         Accept: "application/json",
       },
       body: JSON.stringify({
-        from: { postal_code: "05659000" }, // CEP de origem (da loja)
+        from: { postal_code: "01001000" }, // CEP da loja
         to: { postal_code: cepDestino },
         products: [
           {
@@ -39,17 +39,18 @@ router.post("/", async (req, res) => {
           receipt: false,
           collect: false,
         },
-        services: "2", // 2 = SEDEX (via Correios)
+        services: "2", // SEDEX
       }),
     });
 
     const data = await resposta.json();
-
     console.log("📦 Retorno Melhor Envio:", data);
 
-    // procura o serviço SEDEX
+    // Corrige: pode vir como array ou como objeto único
     const servico = Array.isArray(data)
-      ? data.find((s) => s.name && s.name.toLowerCase().includes("sedex"))
+      ? data.find((s) => s.name?.toLowerCase().includes("sedex"))
+      : data.name?.toLowerCase().includes("sedex")
+      ? data
       : null;
 
     if (!servico || servico.error) {
@@ -66,7 +67,6 @@ router.post("/", async (req, res) => {
 
     const prazoCorreios = Number(servico.delivery_time) || 0;
 
-    // resposta compatível com o front atual
     res.json({
       Codigo: "04014",
       Valor: Number(servico.price || 0).toFixed(2),
