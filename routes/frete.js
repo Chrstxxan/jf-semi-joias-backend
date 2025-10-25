@@ -8,7 +8,7 @@ const router = express.Router();
  * Exemplo: MELHOR_ENVIO_TOKEN=teu_token_aqui
  */
 
-const MELHOR_ENVIO_URL = "https://sandbox.melhorenvio.com.br/api/v2/me/shipment/calculate"; 
+const MELHOR_ENVIO_URL = "https://www.melhorenvio.com.br/api/v2/me/shipment/calculate"; 
 // ⚠️ Troque para a URL de produção depois: https://www.melhorenvio.com.br/api/v2/me/shipment/calculate
 
 router.post("/", async (req, res) => {
