@@ -54,10 +54,12 @@ router.post("/mp/preference", auth, async (req, res) => {
       });
     }
 
+    // ✅ Calcula o frete corretamente
     const freteFinal =
       itensValidados.length === 1 && itensValidados[0].preco === 1 ? 0 : Number(frete || 0);
     const total = subtotal + freteFinal;
 
+    // ✅ Cria o pedido no banco
     const order = await Order.create({
       usuario: req.user.id,
       produtos: itensValidados,
@@ -72,14 +74,28 @@ router.post("/mp/preference", auth, async (req, res) => {
     const frontOrigin =
       process.env.FRONT_ORIGIN?.trim().replace(/\/$/, "") || "http://127.0.0.1:5500";
 
+    // ✅ Cria a preferência com o frete incluído
     const prefBody = {
-      items: itensValidados.map((i) => ({
-        id: String(order._id),
-        title: i.nome,
-        quantity: i.quantidade,
-        unit_price: i.preco,
-        currency_id: "BRL",
-      })),
+      items: [
+        ...itensValidados.map((i) => ({
+          id: String(order._id),
+          title: i.nome,
+          quantity: i.quantidade,
+          unit_price: i.preco,
+          currency_id: "BRL",
+        })),
+        ...(freteFinal > 0
+          ? [
+              {
+                id: `frete-${order._id}`,
+                title: "Frete",
+                quantity: 1,
+                unit_price: freteFinal,
+                currency_id: "BRL",
+              },
+            ]
+          : []),
+      ],
       back_urls: {
         success: `${frontOrigin}/index.html?pagamento=success`,
         failure: `${frontOrigin}/index.html?pagamento=failure`,
@@ -112,7 +128,7 @@ router.post("/mp/preference", auth, async (req, res) => {
 });
 
 // ================================
-// 📩 WEBHOOK MERCADO PAGO
+// 📩 WEBHOOK MERCADO PAGO (inalterado)
 // ================================
 router.post("/mp/webhook", async (req, res) => {
   const session = await mongoose.startSession();
@@ -177,7 +193,7 @@ router.post("/mp/webhook", async (req, res) => {
     }
 
     const statusPagamento =
-      mpStatus === "approved" ? "pago" : mpStatus === "rejected" ? "rejeitado" : "pendente";
+      mpStatus === "approved" ? "pago" : mpStatus === "rejeitado" ? "rejeitado" : "pendente";
 
     order.statusPagamento = statusPagamento;
     order.status = statusPagamento === "pago" ? "pago" : order.status;
@@ -197,7 +213,7 @@ router.post("/mp/webhook", async (req, res) => {
     await session.commitTransaction();
     session.endSession();
 
-    // ========== Emails fora da transação ==========
+    // e-mails (inalterados)
     try {
       if (statusPagamento === "pago") {
         console.log("🧩 Entrando no bloco de e-mail pós-pagamento...");
