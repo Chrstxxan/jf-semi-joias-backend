@@ -1,7 +1,15 @@
-// backend/routes/frete.js
 const express = require("express");
 const fetch = require("node-fetch");
 const router = express.Router();
+
+/**
+ * ⚙️ CONFIGURAÇÕES
+ * Token vem do .env (adicione MELHOR_ENVIO_TOKEN)
+ * Exemplo: MELHOR_ENVIO_TOKEN=teu_token_aqui
+ */
+
+const MELHOR_ENVIO_URL = "https://sandbox.melhorenvio.com.br/api/v2/me/shipment/calculate"; 
+// ⚠️ Troque para a URL de produção depois: https://www.melhorenvio.com.br/api/v2/me/shipment/calculate
 
 router.post("/", async (req, res) => {
   try {
@@ -11,66 +19,90 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ erro: "CEP de destino inválido" });
     }
 
-    console.log("🧾 Calculando frete via correiosapi.app.br para:", cepDestino);
+    console.log("🧾 Calculando frete via Melhor Envio para:", cepDestino);
 
-    const payload = {
-      sCepOrigem: "05659000", // CEP da loja (ajusta pro teu)
-      sCepDestino: cepDestino,
-      nVlPeso: "1",
-      nCdFormato: "1",
-      nVlComprimento: "20",
-      nVlAltura: "10",
-      nVlLargura: "15",
-      nCdServico: "04014", // SEDEX
-      nVlDiametro: "0",
+    // Dados da loja (origem)
+    const body = {
+      from: { postal_code: "01001000" }, // CEP da loja
+      to: { postal_code: cepDestino },
+      products: [
+        {
+          id: "1",
+          width: 15,
+          height: 10,
+          length: 20,
+          weight: 0.3, // 300g
+          insurance_value: 50,
+          quantity: 1,
+        },
+      ],
+      services: "1,2,3", // SEDEX, PAC, Jadlog, etc (você pode limitar)
+      options: {
+        receipt: false,
+        own_hand: false,
+      },
     };
 
-    let resultado;
-    try {
-      const response = await fetch("https://correiosapi.app.br/api/frete", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+    const response = await fetch(MELHOR_ENVIO_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.MELHOR_ENVIO_TOKEN}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify(body),
+    });
 
-      if (!response.ok) throw new Error(`Erro HTTP: ${response.status}`);
-      resultado = await response.json();
-      console.log("📦 Resultado API Correios:", resultado);
-    } catch (apiErr) {
-      console.warn("⚠️ Falha ao chamar API Correios:", apiErr.message);
-      resultado = null;
-    }
+    const data = await response.json();
 
-    // Se a API falhar, usa fallback
-    if (!resultado || !resultado[0] || !resultado[0].Valor) {
-      console.warn("⚠️ Retorno inválido. Usando frete simulado.");
-      return res.json({
-        Codigo: "04014",
+    // Se o Melhor Envio retornar erro:
+    if (!response.ok) {
+      console.error("❌ Erro na API do Melhor Envio:", data);
+      return res.status(500).json({
+        Codigo: "000",
         Valor: "24,90",
         PrazoCorreios: 4,
         PrazoMedio: 9,
         PrazoMaximo: 14,
-        MsgErro: "Erro geral — usando simulação local",
+        MsgErro: data.message || "Erro ao consultar Melhor Envio (fallback)",
       });
     }
 
-    const frete = resultado[0];
-    const prazoCorreios = Number(frete.PrazoEntrega || 0);
+    console.log("📦 Retorno Melhor Envio:", data);
+
+    // Usa o primeiro resultado de serviço (por exemplo, o mais barato)
+    const servico = Array.isArray(data) && data.length > 0 ? data[0] : null;
+    if (!servico) {
+      return res.status(500).json({
+        Codigo: "000",
+        Valor: "24,90",
+        PrazoCorreios: 4,
+        PrazoMedio: 9,
+        PrazoMaximo: 14,
+        MsgErro: "Nenhum serviço disponível (fallback)",
+      });
+    }
+
+    // Calcula prazos adicionais (5 e 10 dias úteis)
+    const prazoCorreios = Number(servico.delivery_time || 0);
     const prazoMedio = prazoCorreios + 5;
     const prazoMaximo = prazoCorreios + 10;
 
-    res.json({
-      Codigo: frete.Codigo,
-      Valor: frete.Valor,
+    const resultado = {
+      Codigo: servico.id || "000",
+      Nome: servico.name || "Serviço desconhecido",
+      Valor: Number(servico.price).toFixed(2),
       PrazoCorreios: prazoCorreios,
       PrazoMedio: prazoMedio,
       PrazoMaximo: prazoMaximo,
-      MsgErro: frete.MsgErro || "",
-    });
+      MsgErro: null,
+    };
+
+    return res.json(resultado);
   } catch (error) {
-    console.error("💥 Erro ao calcular frete:", error.message);
-    res.json({
-      Codigo: "04014",
+    console.error("💥 Erro geral ao calcular frete:", error.message);
+    return res.json({
+      Codigo: "000",
       Valor: "24,90",
       PrazoCorreios: 4,
       PrazoMedio: 9,
