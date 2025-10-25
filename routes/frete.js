@@ -23,7 +23,7 @@ router.post("/", async (req, res) => {
 
     // Dados da loja (origem)
     const body = {
-      from: { postal_code: "01001000" }, // CEP da loja
+      from: { postal_code: "05659000" }, // CEP da loja
       to: { postal_code: cepDestino },
       products: [
         {
