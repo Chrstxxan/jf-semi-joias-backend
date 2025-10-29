@@ -21,7 +21,7 @@ const PORT = process.env.PORT || 5000;
 
 /* =========================================
    CORS multi-domínio (usa FRONT_ORIGINS)
-   Exemplo .env:
+   Exemplo .env no Render:
    FRONT_ORIGINS=https://www.jfsemijoias.com,https://jfsemijoias.com,https://jf-semi-joias-frontend.vercel.app,http://127.0.0.1:5500
 ========================================= */
 const rawOrigins = process.env.FRONT_ORIGINS
@@ -57,8 +57,23 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-// habilita preflight global
-app.options('*', cors(corsOptions));
+// ✅ Express 5: use '/*' em vez de '*'
+app.options('/*', cors(corsOptions));
+
+// Fallback simples para OPTIONS (evita 404 em preflight)
+app.use((req, res, next) => {
+  if (req.method === 'OPTIONS') {
+    res.header('Access-Control-Allow-Origin', req.headers.origin || '');
+    res.header('Access-Control-Allow-Credentials', 'true');
+    res.header(
+      'Access-Control-Allow-Headers',
+      'Origin, X-Requested-With, Content-Type, Accept, Authorization'
+    );
+    res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+    return res.sendStatus(204);
+  }
+  next();
+});
 
 app.use(express.json());
 app.use(cookieParser());
