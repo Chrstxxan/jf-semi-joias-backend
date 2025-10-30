@@ -39,18 +39,22 @@ router.post("/mp/preference", auth, async (req, res) => {
 
     let subtotal = 0;
     const itensValidados = [];
+
     for (const i of itens) {
       const p = await Produto.findById(String(i.produtoId).trim());
       if (!p) return res.status(400).json({ erro: `Produto inválido: ${i.produtoId}` });
 
       const qnt = Number(i.quantidade || 1);
       subtotal += p.preco * qnt;
+
+      // 🆕 Inclui o tamanho se vier do frontend
       itensValidados.push({
         produtoId: p._id,
         nome: p.nome,
         imagem: p.imagens?.[0] || "",
         preco: p.preco,
         quantidade: qnt,
+        tamanho: i.tamanho || null, // 👈 novo campo
       });
     }
 
@@ -59,7 +63,7 @@ router.post("/mp/preference", auth, async (req, res) => {
       itensValidados.length === 1 && itensValidados[0].preco === 1 ? 0 : Number(frete || 0);
     const total = subtotal + freteFinal;
 
-    // ✅ Cria o pedido no banco
+    // ✅ Cria o pedido no banco com o tamanho incluído
     const order = await Order.create({
       usuario: req.user.id,
       produtos: itensValidados,
@@ -79,7 +83,7 @@ router.post("/mp/preference", auth, async (req, res) => {
       items: [
         ...itensValidados.map((i) => ({
           id: String(order._id),
-          title: i.nome,
+          title: `${i.nome}${i.tamanho ? ` (Tamanho ${i.tamanho})` : ""}`, // 👈 mostra o tamanho no item do checkout
           quantity: i.quantidade,
           unit_price: i.preco,
           currency_id: "BRL",
@@ -213,7 +217,7 @@ router.post("/mp/webhook", async (req, res) => {
     await session.commitTransaction();
     session.endSession();
 
-    // e-mails (inalterados)
+    // ✉️ E-mails (inalterados)
     try {
       if (statusPagamento === "pago") {
         console.log("🧩 Entrando no bloco de e-mail pós-pagamento...");
@@ -225,7 +229,7 @@ router.post("/mp/webhook", async (req, res) => {
         const resumoProdutos = (order.produtos || [])
           .map(
             (p) =>
-              `<li>${p.nome || "Produto"} (x${p.quantidade || 0}) — R$ ${(
+              `<li>${p.nome || "Produto"}${p.tamanho ? ` (Tamanho ${p.tamanho})` : ""} (x${p.quantidade || 0}) — R$ ${(
                 (p.preco || 0) * (p.quantidade || 0)
               ).toFixed(2)}</li>`
           )

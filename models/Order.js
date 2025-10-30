@@ -1,11 +1,13 @@
 const mongoose = require("mongoose");
 
 const orderSchema = new mongoose.Schema({
-  usuario: { 
-    type: mongoose.Schema.Types.ObjectId, 
-    ref: "User", 
-    required: true 
+  usuario: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+    required: true
   },
+
+  // 🧾 Produtos do pedido
   produtos: [
     {
       produtoId: { type: mongoose.Schema.Types.ObjectId, ref: "Produto" },
@@ -13,13 +15,18 @@ const orderSchema = new mongoose.Schema({
       preco: Number,
       quantidade: { type: Number, default: 1 },
       imagem: String,
+
+      // 🆕 Campo adicionado: tamanho (usado para anéis, mas opcional)
+      tamanho: { type: Number, required: false }
     },
   ],
+
+  // 💰 Totais
   subtotal: { type: Number, required: true },
   frete: { type: Number, default: 0 },
   total: { type: Number, required: true },
 
-  // 👇 agora com nome e telefone
+  // 🏠 Endereço de entrega completo
   enderecoEntrega: {
     nome: String,
     telefone: String,
@@ -32,24 +39,28 @@ const orderSchema = new mongoose.Schema({
     uf: String,
   },
 
-  // 👇 padronizado em PT-BR
+  // 💳 Status de pagamento (integrado com Mercado Pago)
   statusPagamento: {
     type: String,
     enum: ["pendente", "pago", "rejeitado"],
     default: "pendente",
   },
 
+  // 🔗 ID da preferência do Mercado Pago
   mpPreferenceId: { type: String },
 
-  status: { 
-    type: String, 
-    enum: ["pendente", "pago", "enviado", "entregue", "cancelado"], 
-    default: "pendente" 
+  // 📦 Status geral do pedido
+  status: {
+    type: String,
+    enum: ["pendente", "pago", "enviado", "entregue", "cancelado"],
+    default: "pendente",
   },
 
+  // 🚚 Rastreamento e envio
   rastreio: { type: String, default: null },
   dataEnvio: { type: Date, default: null },
 
+  // 🕒 Registro da criação
   criadoEm: { type: Date, default: Date.now },
 });
 
