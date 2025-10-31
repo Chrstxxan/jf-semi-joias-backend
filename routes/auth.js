@@ -140,11 +140,15 @@ router.post('/reset', async (req, res) => {
     }
 
     // ✅ usa o método do model que já faz o hash corretamente
+    // Atualiza senha com hash e salva de forma segura
     await user.atualizarSenha(novaSenha);
 
-    user.resetToken = null;
-    user.resetTokenExpira = null;
-    await user.save();
+    // Remove token e salva direto sem reexecutar o hook
+    await User.updateOne(
+      { _id: user._id },
+      { $set: { resetToken: null, resetTokenExpira: null } }
+    );
+
 
     res.json({ mensagem: 'Senha redefinida com sucesso!' });
   } catch (e) {
