@@ -33,8 +33,8 @@ const userSchema = new mongoose.Schema({
   // 🧭 Nível de acesso
   role: {
     type: String,
-    enum: ['user', 'admin'],
-    default: 'user'
+    enum: ['cliente', 'admin'],
+    default: 'cliente'
   },
 
   // 🔒 Recuperação de senha
