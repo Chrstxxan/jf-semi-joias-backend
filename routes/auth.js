@@ -124,7 +124,7 @@ router.post('/forgot', async (req, res) => {
 });
 
 // ================================
-// ♻️ Redefinir senha via token
+// ♻️ Redefinir senha via token (corrigido)
 // ================================
 router.post('/reset', async (req, res) => {
   try {
@@ -135,9 +135,13 @@ router.post('/reset', async (req, res) => {
       resetTokenExpira: { $gt: Date.now() }
     });
 
-    if (!user) return res.status(400).json({ erro: 'Token inválido ou expirado.' });
+    if (!user) {
+      return res.status(400).json({ erro: 'Token inválido ou expirado.' });
+    }
 
-    user.senha = await bcrypt.hash(novaSenha, 10);
+    // ✅ usa o método do model que já faz o hash corretamente
+    await user.atualizarSenha(novaSenha);
+
     user.resetToken = null;
     user.resetTokenExpira = null;
     await user.save();
