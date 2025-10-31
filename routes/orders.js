@@ -109,4 +109,19 @@ router.post('/:id/rastreio', auth, isAdmin, async (req, res) => {
   }
 });
 
+// ================================
+// 🧾 Obter último pedido do usuário logado
+// (usado pra verificar status real pós-pagamento)
+// ================================
+router.get('/ultimo', auth, async (req, res) => {
+  try {
+    const ultimoPedido = await Order.findOne({ usuario: req.user.id })
+      .sort({ criadoEm: -1 });
+    res.json(ultimoPedido || {});
+  } catch (error) {
+    console.error('Erro ao buscar último pedido:', error);
+    res.status(500).json({ erro: 'Erro ao buscar último pedido' });
+  }
+});
+
 module.exports = router;
