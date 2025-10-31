@@ -47,23 +47,22 @@ router.post("/mp/preference", auth, async (req, res) => {
       const qnt = Number(i.quantidade || 1);
       subtotal += p.preco * qnt;
 
-      // 🆕 Inclui o tamanho se vier do frontend
       itensValidados.push({
         produtoId: p._id,
         nome: p.nome,
         imagem: p.imagens?.[0] || "",
         preco: p.preco,
         quantidade: qnt,
-        tamanho: i.tamanho || null, // 👈 novo campo
+        tamanho: i.tamanho || null,
       });
     }
 
-    // ✅ Calcula o frete corretamente
+    // ✅ Calcula frete e total
     const freteFinal =
       itensValidados.length === 1 && itensValidados[0].preco === 1 ? 0 : Number(frete || 0);
     const total = subtotal + freteFinal;
 
-    // ✅ Cria o pedido no banco com o tamanho incluído
+    // ✅ Cria pedido no banco
     const order = await Order.create({
       usuario: req.user.id,
       produtos: itensValidados,
@@ -75,15 +74,16 @@ router.post("/mp/preference", auth, async (req, res) => {
       enderecoEntrega,
     });
 
-    const frontOrigin =
-      process.env.FRONT_ORIGIN?.trim().replace(/\/$/, "") || "http://127.0.0.1:5500";
+    // ✅ Origem segura (sem barra final)
+    const rawFront = (process.env.FRONT_ORIGIN || "https://jfsemijoias.com").trim();
+    const frontOrigin = rawFront.replace(/\/$/, "");
 
-    // ✅ Cria a preferência com o frete incluído
+    // ✅ Cria preferência Mercado Pago
     const prefBody = {
       items: [
         ...itensValidados.map((i) => ({
           id: String(order._id),
-          title: `${i.nome}${i.tamanho ? ` (Tamanho ${i.tamanho})` : ""}`, // 👈 mostra o tamanho no item do checkout
+          title: `${i.nome}${i.tamanho ? ` (Tamanho ${i.tamanho})` : ""}`,
           quantity: i.quantidade,
           unit_price: i.preco,
           currency_id: "BRL",
@@ -116,7 +116,10 @@ router.post("/mp/preference", auth, async (req, res) => {
     };
 
     const pref = await mpFetch("/checkout/preferences", { method: "POST", body: prefBody });
-    if (!pref.ok) throw new Error(pref.body?.message || "Falha ao criar preferência");
+    if (!pref.ok) {
+      console.error("💥 Erro MP:", pref.body);
+      throw new Error(pref.body?.message || "Falha ao criar preferência");
+    }
 
     await Order.findByIdAndUpdate(order._id, { mpPreferenceId: pref.body.id });
 
@@ -132,7 +135,7 @@ router.post("/mp/preference", auth, async (req, res) => {
 });
 
 // ================================
-// 📩 WEBHOOK MERCADO PAGO (inalterado)
+// 📩 WEBHOOK MERCADO PAGO (INALTERADO)
 // ================================
 router.post("/mp/webhook", async (req, res) => {
   const session = await mongoose.startSession();
@@ -142,7 +145,8 @@ router.post("/mp/webhook", async (req, res) => {
     console.log("📩 Webhook recebido:", JSON.stringify(req.body, null, 2));
 
     const { data, resource } = req.body;
-    let pagamentoId = data?.id || (resource?.includes("payments") ? resource.split("/").pop() : null);
+    let pagamentoId =
+      data?.id || (resource?.includes("payments") ? resource.split("/").pop() : null);
 
     if (!pagamentoId) {
       console.warn("⚠️ Webhook sem ID válido:", req.body);
@@ -217,10 +221,10 @@ router.post("/mp/webhook", async (req, res) => {
     await session.commitTransaction();
     session.endSession();
 
-    // ✉️ E-mails (inalterados)
+    // ✉️ E-mails
     try {
       if (statusPagamento === "pago") {
-        console.log("🧩 Entrando no bloco de e-mail pós-pagamento...");
+        console.log("🧩 Enviando e-mails pós-pagamento...");
         const cliente = order.usuario || {};
         const endereco = order.enderecoEntrega || {};
         const adminEmail =
