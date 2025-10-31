@@ -75,8 +75,17 @@ router.post("/mp/preference", auth, async (req, res) => {
     });
 
     // ✅ Origem segura (sem barra final)
-    const rawFront = (process.env.FRONT_ORIGIN || "https://jfsemijoias.com").trim();
+    // ✅ Suporte a FRONT_ORIGINS com múltiplos domínios
+    const rawFront = (
+      process.env.FRONT_ORIGINS
+        ? process.env.FRONT_ORIGINS.split(",").map(d => d.trim().replace(/\/$/, ""))[0]
+        : process.env.FRONT_ORIGIN || "https://jfsemijoias.com"
+    ).trim();
+
     const frontOrigin = rawFront.replace(/\/$/, "");
+
+    console.log("🌐 [MP] Dominio selecionado para retorno:", frontOrigin);
+
 
     // ✅ Cria preferência Mercado Pago
     const prefBody = {
