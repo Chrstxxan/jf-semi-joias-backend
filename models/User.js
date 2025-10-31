@@ -56,10 +56,11 @@ userSchema.methods.verificarSenha = async function (senhaDigitada) {
 };
 
 // 🔁 Atualiza senha manualmente (sem reset via e-mail)
+// 🔁 Atualiza senha (deixa o pre('save') hashear UMA vez)
 userSchema.methods.atualizarSenha = async function (novaSenha) {
-  const salt = await bcrypt.genSalt(10);
-  this.senha = await bcrypt.hash(novaSenha, salt);
-  await this.save();
+  this.senha = novaSenha; // texto puro; o pre('save') vai hashear
+  await this.save();      // dispara o pre('save') e faz 1 único hash
 };
+
 
 module.exports = mongoose.model('User', userSchema);
