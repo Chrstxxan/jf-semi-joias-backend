@@ -184,7 +184,12 @@ router.post('/refresh', async (req, res) => {
     // Busca o usuário e emite novo token (curto prazo)
     const User = require('../models/User');
     const user = await User.findById(payload.id).select('nome email role');
-    if (!user) return res.status(401).json({ erro: 'Usuário não encontrado' });
+
+    // Se o usuário não existir, invalida localStorage para resetar corretamente
+    if (!user) {
+      return res.status(200).json({ token: null });
+    }
+
 
     const newToken = require('jsonwebtoken').sign(
       { id: user._id, email: user.email, role: user.role },
