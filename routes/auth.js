@@ -157,4 +157,46 @@ router.post('/reset', async (req, res) => {
   }
 });
 
+// -----------------------------
+// POST /auth/refresh
+// Recebe Authorization: Bearer <token> (mesmo que expirado) e emite novo access token.
+// Atenção: é uma solução minimalista para renovação automática; planejamento
+// futuro: implementar refresh tokens httpOnly.
+router.post('/refresh', async (req, res) => {
+  try {
+    const header = req.headers.authorization || '';
+    const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+    if (!token) return res.status(401).json({ erro: 'Token não enviado' });
+
+    let payload;
+    try {
+      // Tentamos validar normalmente (caso ainda esteja válido)
+      payload = require('jsonwebtoken').verify(token, process.env.JWT_SECRET);
+    } catch (err) {
+      // Se expirou, extraímos o payload IGNORANDO expiração (a assinatura continua válida).
+      if (err.name === 'TokenExpiredError') {
+        payload = require('jsonwebtoken').verify(token, process.env.JWT_SECRET, { ignoreExpiration: true });
+      } else {
+        return res.status(401).json({ erro: 'Token inválido' });
+      }
+    }
+
+    // Busca o usuário e emite novo token (curto prazo)
+    const User = require('../models/User');
+    const user = await User.findById(payload.id).select('nome email role');
+    if (!user) return res.status(401).json({ erro: 'Usuário não encontrado' });
+
+    const newToken = require('jsonwebtoken').sign(
+      { id: user._id, email: user.email, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' } // mantém mesma duracao atual; altera se quiseres reduzir
+    );
+
+    return res.json({ token: newToken });
+  } catch (e) {
+    console.error('💥 Erro em /auth/refresh:', e);
+    return res.status(500).json({ erro: 'Falha ao renovar token' });
+  }
+});
+
 module.exports = router;
