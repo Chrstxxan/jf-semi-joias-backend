@@ -58,6 +58,8 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));              // ✅ já trata preflight (OPTIONS) no Express 5
+app.options('*', cors(corsOptions));
+
 app.use(express.json());
 app.use(cookieParser());
 
