@@ -8,6 +8,9 @@ const User = require("../models/User");
 const auth = require("../middleware/auth");
 const enviarEmail = require("../utils/mailer");
 
+const descontoAtivo = process.env.BF_ACTIVE === "true";
+const descontoPercentual = Number(process.env.BF_PERCENT || 0);
+
 const router = express.Router();
 
 // ============ Utils ============
@@ -40,29 +43,49 @@ router.post("/mp/preference", auth, async (req, res) => {
     let subtotal = 0;
     const itensValidados = [];
 
+    // ================================
+    // 🔥 LOOP CORRIGIDO DOS PRODUTOS
+    // ================================
     for (const i of itens) {
       const p = await Produto.findById(String(i.produtoId).trim());
       if (!p) return res.status(400).json({ erro: `Produto inválido: ${i.produtoId}` });
 
       const qnt = Number(i.quantidade || 1);
-      subtotal += p.preco * qnt;
+
+      let precoFinal = p.preco;
+
+      // Se BF ativa → validar preço vindo do front
+      if (descontoAtivo && descontoPercentual > 0) {
+        const precoEsperado = Number((p.preco * (1 - descontoPercentual / 100)).toFixed(2));
+        const precoEnviado = i.preco ? Number(i.preco) : null;
+
+        // validação anti-fraude
+        if (precoEnviado && Math.abs(precoEnviado - precoEsperado) < 0.01) {
+          precoFinal = precoEsperado;
+        } else {
+          precoFinal = p.preco;
+        }
+      }
+
+      subtotal += precoFinal * qnt;
 
       itensValidados.push({
         produtoId: p._id,
         nome: p.nome,
         imagem: p.imagens?.[0] || "",
-        preco: p.preco,
+        preco: precoFinal, // ← agora correto
         quantidade: qnt,
         tamanho: i.tamanho || null,
       });
     }
 
-    // ✅ Calcula frete e total
+    // Calcula frete
     const freteFinal =
       itensValidados.length === 1 && itensValidados[0].preco === 1 ? 0 : Number(frete || 0);
+
     const total = subtotal + freteFinal;
 
-    // ✅ Cria pedido no banco
+    // Cria pedido
     const order = await Order.create({
       usuario: req.user.id,
       produtos: itensValidados,
@@ -74,8 +97,7 @@ router.post("/mp/preference", auth, async (req, res) => {
       enderecoEntrega,
     });
 
-    // ✅ Origem segura (sem barra final)
-    // ✅ Suporte a FRONT_ORIGINS com múltiplos domínios
+    // Origem do front
     const rawFront = (
       process.env.FRONT_ORIGINS
         ? process.env.FRONT_ORIGINS.split(",").map(d => d.trim().replace(/\/$/, ""))[0]
@@ -86,15 +108,14 @@ router.post("/mp/preference", auth, async (req, res) => {
 
     console.log("🌐 [MP] Dominio selecionado para retorno:", frontOrigin);
 
-
-    // ✅ Cria preferência Mercado Pago
+    // Cria preferência Mercado Pago
     const prefBody = {
       items: [
         ...itensValidados.map((i) => ({
           id: String(order._id),
           title: `${i.nome}${i.tamanho ? ` (Tamanho ${i.tamanho})` : ""}`,
           quantity: i.quantidade,
-          unit_price: i.preco,
+          unit_price: i.preco, // ← AGORA O MERCADO PAGO RECEBE O PREÇO COM DESCONTO
           currency_id: "BRL",
         })),
         ...(freteFinal > 0
@@ -124,7 +145,11 @@ router.post("/mp/preference", auth, async (req, res) => {
       notification_url: `${process.env.BASE_URL}/payment/mp/webhook`,
     };
 
-    const pref = await mpFetch("/checkout/preferences", { method: "POST", body: prefBody });
+    const pref = await mpFetch("/checkout/preferences", {
+      method: "POST",
+      body: prefBody,
+    });
+
     if (!pref.ok) {
       console.error("💥 Erro MP:", pref.body);
       throw new Error(pref.body?.message || "Falha ao criar preferência");
