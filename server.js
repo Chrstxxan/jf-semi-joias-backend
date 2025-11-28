@@ -20,44 +20,72 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 /* ================================
-   CORS multi-domínio (FRONT_ORIGINS)
-   Exemplo no Render:
-   FRONT_ORIGINS=https://www.jfsemijoias.com,https://jfsemijoias.com,https://jf-semi-joias-frontend.vercel.app,http://127.0.0.1:5500
+   CORS Ultra-Compatível (Vercel + Produção)
 ================================ */
 const rawOrigins = process.env.FRONT_ORIGINS
-  ? process.env.FRONT_ORIGINS.split(',').map(s => s.trim().replace(/\/$/, ''))
-  : ['http://127.0.0.1:5500'];
+  ? process.env.FRONT_ORIGINS.split(',').map(s =>
+      s.trim().replace(/\/$/, '').replace(/^www\./, '')
+    )
+  : ['127.0.0.1:5500'];
 
-function variants(origin) {
+const allowed = new Set();
+
+// normaliza cada domínio
+function clean(origin) {
   try {
     const u = new URL(origin);
-    const host = u.hostname.replace(/^www\./, '');
-    return new Set([
-      `${u.protocol}//${host}`,
-      `${u.protocol}//www.${host}`,
-      origin.replace(/\/$/, ''),
-    ]);
+    return u.host.replace(/^www\./, '');
   } catch {
-    return new Set([origin]);
+    return origin.replace(/^www\./, '');
   }
 }
 
-const allowed = new Set();
-rawOrigins.forEach(o => variants(o).forEach(v => allowed.add(v)));
+// cria variações: com www, sem www, com http/https
+rawOrigins.forEach((o) => {
+  try {
+    const u = new URL(o.startsWith('http') ? o : `https://${o}`);
+    const host = u.host.replace(/^www\./, '');
+
+    allowed.add(`${host}`);
+    allowed.add(`www.${host}`);
+  } catch {
+    // caso venha só host simples
+    const host = o.replace(/^www\./, '');
+    allowed.add(host);
+    allowed.add(`www.${host}`);
+  }
+});
 
 const corsOptions = {
   origin(origin, cb) {
-    // Sem Origin (curl/healthcheck) -> ok
+    // Sem origin → healthcheck → libere
     if (!origin) return cb(null, true);
-    if (allowed.has(origin)) return cb(null, true);
+
+    let host;
+    try {
+      host = new URL(origin).host.replace(/^www\./, '');
+    } catch {
+      host = origin.replace(/^https?:\/\//, '').replace(/^www\./, '');
+    }
+
+    // Liberar domínios declarados no FRONT_ORIGINS
+    if (
+      allowed.has(host) ||
+      allowed.has(`www.${host}`)
+    ) {
+      return cb(null, true);
+    }
+
+    // Liberar Vercel Preview / Deploy Interno
+    if (host.includes('.vercel.app')) return cb(null, true);
+
     return cb(new Error(`Not allowed by CORS: ${origin}`));
   },
   credentials: true,
-  // opcional: status do preflight (p/ alguns proxies chatos)
   optionsSuccessStatus: 204,
 };
 
-app.use(cors(corsOptions));              // ✅ já trata preflight (OPTIONS) no Express 5
+app.use(cors(corsOptions));
 
 app.use(express.json());
 app.use(cookieParser());
